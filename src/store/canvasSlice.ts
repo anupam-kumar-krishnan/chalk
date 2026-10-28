@@ -126,6 +126,20 @@ const slice = createSlice({
         sh.y += a.payload.dy;
       }
     },
+    /** Stretch/reposition a shape during a drag. Doesn't record; call beginChange() first. */
+    resizeShape: (
+      s,
+      a: PayloadAction<{
+        id: string;
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+      }>,
+    ) => {
+      const sh = s.shapes.find((x) => x.id === a.payload.id);
+      if (sh) Object.assign(sh, a.payload);
+    },
     deleteShape: (s, a: PayloadAction<string>) => {
       if (!isEmptyText(s.shapes.find((x) => x.id === a.payload))) record(s);
       s.shapes = s.shapes.filter((x) => x.id !== a.payload);
@@ -170,6 +184,7 @@ export const {
   addShape,
   updateShape,
   moveShape,
+  resizeShape,
   deleteShape,
   beginChange,
   undo,

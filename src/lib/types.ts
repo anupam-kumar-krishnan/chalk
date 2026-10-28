@@ -15,6 +15,7 @@ export type Tool =
   | "draw"
   | "text"
   | "icon";
+
 export type Shape = {
   id: string;
   kind: Exclude<Tool, "select">;
@@ -24,4 +25,9 @@ export type Shape = {
   h: number;
   pts?: number[][];
   text?: string;
+  color?: string;
+  fill?: "pastel" | "solid" | "outline" | "shadow";
+  size?: "s" | "m" | "l";
+  label?: string;
+  link?: string;
 };

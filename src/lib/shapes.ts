@@ -1,20 +1,13 @@
 import { Shape } from "./types";
+import { ICON_IDS, ICONS as ICON_DEFS, type IconId } from "./icons";
 
 export const newId = () => "s" + Math.random().toString(36).slice(2, 9);
-export const ICONS: [string, string][] = [
-  ["🗄️", "Database"],
-  ["🖥️", "Server"],
-  ["☁️", "Cloud"],
-  ["👤", "User"],
-  ["🔒", "Lock"],
-  ["✉️", "Mail"],
-  ["📱", "Mobile"],
-  ["🌐", "Web"],
-  ["⚙️", "Service"],
-  ["📦", "Package"],
-  ["🔔", "Alerts"],
-  ["💳", "Payments"],
-];
+
+/** Picker list as [iconId, label] pairs. Same tuple shape as before, but the first value is now an icon id, not an emoji. */
+export const ICONS: [IconId, string][] = ICON_IDS.map((id) => [
+  id,
+  ICON_DEFS[id].label,
+]);
 
 /** Bounding box in canvas units. */
 export function bbox(s: Shape) {
