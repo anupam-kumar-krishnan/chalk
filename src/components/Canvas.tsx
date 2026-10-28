@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { RootState } from "@/store";
 import {
@@ -12,6 +12,7 @@ import {
   moveShape,
   panBy,
   redo,
+  resizeShape,
   selectShape,
   setTool,
   setView,
@@ -21,20 +22,68 @@ import {
 } from "@/store/canvasSlice";
 import { NODE_H, NODE_W, Shape } from "@/lib/types";
 import { bbox, ICONS, newId, normalize } from "@/lib/shapes";
+import { IconGlyph, ICONS as ICON_DEFS, resolveIconId } from "@/lib/icons";
 import Toolbar, { TOOLS } from "./Toolbar";
+import ShapeBar from "./ShapeBar";
+import {
+  DEFAULT_PAPER,
+  INK,
+  look,
+  markerIdx,
+  openLink,
+  PALETTE,
+} from "@/lib/shapeStyle";
+
+// Icon sizing. Size is stored in the shape's w/h (older saved icons have w = 0 → default).
+const ICON_DEFAULT = 48;
+const ICON_MIN = 16;
+const ICON_MAX = 512;
+const SEL_PAD = 6; // gap between icon and its dashed selection box
+const HANDLE_PX = 10; // resize handle size on screen (stays constant while zooming)
+const ICON_STROKE = 2.5; // world units; at 48px this equals the old 1.25 * scale(2)
+
+const iconSize = (s: Shape) => s.w || ICON_DEFAULT;
+
+// Text: font size lives in the shape's `h` (0 on older text → default).
+const FONT_DEFAULT = 16;
+const FONT_MIN = 8;
+const FONT_MAX = 200;
+const MIN_BOX = 8; // smallest rect / ellipse side
+const textSize = (s: Shape) => s.h || FONT_DEFAULT;
+
+type Handle = "nw" | "ne" | "sw" | "se" | "start" | "end";
+
+// Same as bbox(), but icons and text use their stored size, so the selection box and Fit follow resizing.
+const boxOf = (s: Shape) => {
+  if (s.kind === "icon")
+    return { x: s.x, y: s.y, w: iconSize(s), h: iconSize(s) };
+  if (s.kind === "text") {
+    const fs = textSize(s);
+    // approximate width: ~0.55em per character
+    return {
+      x: s.x,
+      y: s.y,
+      w: Math.max(fs * 2, (s.text?.length ?? 0) * fs * 0.55),
+      h: fs * 1.3,
+    };
+  }
+  return bbox(s);
+};
 
 function ShapeView({ s }: { s: Shape }) {
-  const b = bbox(s);
+  const b = boxOf(s);
+  const l = look(s);
   const c = {
-    stroke: "var(--color-paper)",
-    strokeWidth: 2,
+    stroke: l.col,
+    strokeWidth: l.sw,
     fill: "none",
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
   };
+  let body: ReactNode = null;
   switch (s.kind) {
     case "rect":
-      return (
+      body = (
         <rect
           x={b.x}
           y={b.y}
@@ -43,10 +92,13 @@ function ShapeView({ s }: { s: Shape }) {
           rx="6"
           pointerEvents="all"
           {...c}
+          fill={l.boxFill}
+          fillOpacity={l.boxFillOpacity}
         />
       );
+      break;
     case "ellipse":
-      return (
+      body = (
         <ellipse
           cx={b.x + b.w / 2}
           cy={b.y + b.h / 2}
@@ -54,11 +106,14 @@ function ShapeView({ s }: { s: Shape }) {
           ry={b.h / 2}
           pointerEvents="all"
           {...c}
+          fill={l.boxFill}
+          fillOpacity={l.boxFillOpacity}
         />
       );
+      break;
     case "arrow":
     case "line":
-      return (
+      body = (
         <>
           <line
             x1={s.x}
@@ -66,7 +121,10 @@ function ShapeView({ s }: { s: Shape }) {
             x2={s.x + s.w}
             y2={s.y + s.h}
             {...c}
-            markerEnd={s.kind === "arrow" ? "url(#arrow-w)" : undefined}
+            opacity={l.opacity}
+            markerEnd={
+              s.kind === "arrow" ? `url(#arrow-c${markerIdx(s)})` : undefined
+            }
           />
           <line
             x1={s.x}
@@ -78,28 +136,139 @@ function ShapeView({ s }: { s: Shape }) {
           />
         </>
       );
+      break;
     case "draw":
-      return (
+      body = (
         <polyline
           points={(s.pts ?? [])
             .map((p) => `${s.x + p[0]},${s.y + p[1]}`)
             .join(" ")}
           {...c}
+          opacity={l.opacity}
         />
       );
+      break;
     case "text":
-      return (
-        <text x={s.x} y={s.y + 17} fill="var(--color-paper)" fontSize="16">
+      body = (
+        <text
+          x={s.x}
+          y={s.y + textSize(s) * 1.06}
+          fill={l.col}
+          opacity={l.opacity}
+          fontSize={textSize(s)}
+        >
           {s.text}
         </text>
       );
-    case "icon":
-      return (
-        <text x={s.x} y={s.y + 38} fontSize="40">
-          {s.text}
-        </text>
+      break;
+    case "icon": {
+      const id = resolveIconId(s.text ?? "");
+      const size = iconSize(s);
+      // Fallback: anything that isn't a known icon id or legacy emoji draws as text, scaled with size.
+      if (!id) {
+        body = (
+          <text
+            x={s.x}
+            y={s.y + size * 0.8}
+            fontSize={size * 0.83}
+            fill={l.col}
+          >
+            {s.text}
+          </text>
+        );
+        break;
+      }
+      // pastel / full draw a rounded tile behind a slightly smaller glyph
+      const tile = l.f === "solid" || l.f === "pastel";
+      const sw = (ICON_STROKE * 24) / size; // compensates the group's scale: constant line thickness
+      body = (
+        <g
+          transform={`translate(${s.x} ${s.y}) scale(${size / 24})`}
+          fill="none"
+          stroke={l.f === "solid" ? INK : l.col}
+          strokeWidth={sw}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          {/* tile, or a transparent hit area so the whole icon can be grabbed */}
+          {tile ? (
+            <rect
+              width="24"
+              height="24"
+              rx="5.5"
+              fill={l.col}
+              fillOpacity={l.boxFillOpacity}
+              stroke="none"
+            />
+          ) : (
+            <rect width="24" height="24" fill="transparent" stroke="none" />
+          )}
+          <g
+            transform={tile ? "translate(3.6 3.6) scale(0.7)" : undefined}
+            strokeWidth={tile ? sw / 0.7 : sw}
+          >
+            {ICON_DEFS[id].paths.map((d) => (
+              <path key={d} d={d} />
+            ))}
+          </g>
+        </g>
       );
+      break;
+    }
   }
+
+  // optional label (icons: under the icon, boxes: centered inside, lines: above the midpoint)
+  let label: ReactNode = null;
+  if (s.label && s.kind !== "text" && s.kind !== "draw") {
+    let x = b.x + b.w / 2,
+      y = b.y + b.h / 2 + 5;
+    if (s.kind === "icon") y = b.y + b.h + 16;
+    else if (s.kind === "line" || s.kind === "arrow") {
+      x = s.x + s.w / 2;
+      y = s.y + s.h / 2 - 8;
+    }
+    label = (
+      <text
+        x={x}
+        y={y}
+        textAnchor="middle"
+        fontSize="13"
+        pointerEvents="none"
+        fill={s.kind === "rect" || s.kind === "ellipse" ? l.ink : DEFAULT_PAPER}
+      >
+        {s.label}
+      </text>
+    );
+  }
+
+  // small badge when the shape has a link; click it to open the link
+  const badge = s.link ? (
+    <g
+      transform={`translate(${b.x + b.w + 2} ${b.y - 12})`}
+      style={{ cursor: "pointer" }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={() => openLink(s.link!)}
+    >
+      <title>{s.link}</title>
+      <circle r="9" fill="var(--color-panel)" stroke="var(--color-line)" />
+      <path
+        d="M-3 3L3 -3M-1.5 -3H3V1.5"
+        fill="none"
+        stroke={DEFAULT_PAPER}
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </g>
+  ) : null;
+
+  return (
+    <>
+      <g style={l.filter ? { filter: l.filter } : undefined}>{body}</g>
+      {label}
+      {badge}
+    </>
+  );
 }
 
 export default function Canvas() {
@@ -108,11 +277,20 @@ export default function Canvas() {
   const dispatch = useDispatch();
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<{
-    kind: "pan" | "node" | "shape" | "create";
+    kind: "pan" | "node" | "shape" | "create" | "resize";
     id?: string;
     x: number;
     y: number;
     moved?: boolean;
+    // resize only: fixed (opposite) corner in world space, and which way the dragged corner points
+    rk?: "icon" | "box" | "text" | "start" | "end";
+    ax?: number;
+    ay?: number;
+    sx?: 1 | -1;
+    sy?: 1 | -1;
+    w0?: number;
+    h0?: number;
+    fs0?: number;
   } | null>(null);
   const draftRef = useRef<Shape | null>(null);
   const [draft, setDraft] = useState<Shape | null>(null);
@@ -130,6 +308,49 @@ export default function Canvas() {
   const setDraftBoth = (s: Shape | null) => {
     draftRef.current = s;
     setDraft(s);
+  };
+
+  // Start dragging a resize handle on the selected shape.
+  // Corner handles ("nw" | "ne" | "sw" | "se") keep the opposite corner fixed.
+  // Line/arrow handles ("start" | "end") keep the other endpoint fixed.
+  const startResize = (e: React.PointerEvent, handle: Handle) => {
+    if (!selected) return;
+    e.stopPropagation();
+    const bx = boxOf(selected);
+    const base = {
+      kind: "resize" as const,
+      id: selected.id,
+      x: e.clientX,
+      y: e.clientY,
+    };
+    if (handle === "start" || handle === "end") {
+      drag.current = {
+        ...base,
+        rk: handle,
+        ax: handle === "start" ? selected.x + selected.w : selected.x,
+        ay: handle === "start" ? selected.y + selected.h : selected.y,
+      };
+    } else {
+      const sx: 1 | -1 = handle[1] === "e" ? 1 : -1;
+      const sy: 1 | -1 = handle[0] === "s" ? 1 : -1;
+      drag.current = {
+        ...base,
+        rk:
+          selected.kind === "icon"
+            ? "icon"
+            : selected.kind === "text"
+              ? "text"
+              : "box",
+        ax: sx > 0 ? bx.x : bx.x + bx.w,
+        ay: sy > 0 ? bx.y : bx.y + bx.h,
+        sx,
+        sy,
+        w0: bx.w,
+        h0: bx.h,
+        fs0: textSize(selected),
+      };
+    }
+    svg.current?.setPointerCapture(e.pointerId);
   };
 
   useEffect(() => {
@@ -186,7 +407,7 @@ export default function Canvas() {
   const fit = () => {
     const boxes = [
       ...nodes.map((n) => ({ x: n.x, y: n.y, w: NODE_W, h: NODE_H })),
-      ...shapes.map(bbox),
+      ...shapes.map(boxOf),
     ];
     if (!boxes.length) return;
     const r = svg.current!.getBoundingClientRect(),
@@ -213,20 +434,23 @@ export default function Canvas() {
       }),
     );
   };
-  const placeIcon = (emoji: string) => {
+  // `iconId` is an icon id such as "database" (older saved shapes may still hold an emoji).
+  const placeIcon = (iconId: string) => {
     const r = svg.current!.getBoundingClientRect(),
       j = (shapes.length % 5) * 14;
+    const sid = newId();
     dispatch(
       addShape({
-        id: newId(),
+        id: sid,
         kind: "icon",
-        text: emoji,
-        w: 0,
-        h: 0,
-        x: (r.width / 2 - view.x) / view.k - 24 + j,
-        y: (r.height / 2 - view.y) / view.k - 24 + j,
+        text: iconId,
+        w: ICON_DEFAULT,
+        h: ICON_DEFAULT,
+        x: (r.width / 2 - view.x) / view.k - ICON_DEFAULT / 2 + j,
+        y: (r.height / 2 - view.y) / view.k - ICON_DEFAULT / 2 + j,
       }),
     );
+    dispatch(selectShape(sid));
     dispatch(setTool("select"));
   };
 
@@ -273,6 +497,60 @@ export default function Canvas() {
       );
       return;
     }
+    if (d.kind === "resize") {
+      const p = toWorld(e);
+      const ax = d.ax!,
+        ay = d.ay!;
+      let patch: { x: number; y: number; w: number; h: number };
+      if (d.rk === "start") {
+        patch = { x: p.x, y: p.y, w: ax - p.x, h: ay - p.y };
+      } else if (d.rk === "end") {
+        patch = { x: ax, y: ay, w: p.x - ax, h: p.y - ay };
+      } else {
+        const sx = d.sx!,
+          sy = d.sy!;
+        // pointer distance from the fixed corner (minus the selection padding)
+        const rw = (p.x - ax) * sx - SEL_PAD,
+          rh = (p.y - ay) * sy - SEL_PAD;
+        if (d.rk === "icon") {
+          // stay square: the axis moved further drives the size
+          const size = Math.min(ICON_MAX, Math.max(ICON_MIN, Math.max(rw, rh)));
+          patch = {
+            x: sx > 0 ? ax : ax - size,
+            y: sy > 0 ? ay : ay - size,
+            w: size,
+            h: size,
+          };
+        } else if (d.rk === "text") {
+          // scale the font size with the box
+          const ratio = Math.max(rw / d.w0!, rh / d.h0!);
+          const fs = Math.min(FONT_MAX, Math.max(FONT_MIN, d.fs0! * ratio));
+          const k = fs / d.fs0!;
+          const w = d.w0! * k,
+            h = d.h0! * k;
+          patch = {
+            x: sx > 0 ? ax : ax - w,
+            y: sy > 0 ? ay : ay - h,
+            w: 0,
+            h: fs, // text stores its font size in h
+          };
+        } else {
+          // rect / ellipse: free stretch
+          const w = Math.max(MIN_BOX, rw),
+            h = Math.max(MIN_BOX, rh);
+          patch = {
+            x: sx > 0 ? ax : ax - w,
+            y: sy > 0 ? ay : ay - h,
+            w,
+            h,
+          };
+        }
+      }
+      if (!d.moved) dispatch(beginChange()); // one undo step for the whole stretch
+      drag.current = { ...d, moved: true };
+      dispatch(resizeShape({ id: d.id!, ...patch }));
+      return;
+    }
     const dx = e.clientX - d.x,
       dy = e.clientY - d.y;
     if (!d.moved && d.kind !== "pan") dispatch(beginChange());
@@ -305,7 +583,27 @@ export default function Canvas() {
   const btn =
     "grid h-8 min-w-8 place-items-center rounded-md px-2 text-sm hover:bg-line disabled:opacity-40";
   const editShape = shapes.find((s) => s.id === editing);
-  const b = selected && bbox(selected);
+  const b = selected && boxOf(selected);
+  const handles: [Handle, number, number, string][] = [];
+  if (selected && b && !editing && tool === "select") {
+    if (selected.kind === "line" || selected.kind === "arrow") {
+      handles.push(
+        ["start", selected.x, selected.y, "pointer"],
+        ["end", selected.x + selected.w, selected.y + selected.h, "pointer"],
+      );
+    } else if (selected.kind !== "draw") {
+      const x0 = b.x - SEL_PAD,
+        y0 = b.y - SEL_PAD,
+        x1 = b.x + b.w + SEL_PAD,
+        y1 = b.y + b.h + SEL_PAD;
+      handles.push(
+        ["nw", x0, y0, "nwse-resize"],
+        ["ne", x1, y0, "nesw-resize"],
+        ["sw", x0, y1, "nesw-resize"],
+        ["se", x1, y1, "nwse-resize"],
+      );
+    }
+  }
   return (
     <div className="relative h-full w-full">
       <svg
@@ -349,6 +647,20 @@ export default function Canvas() {
           >
             <path d="M0 0L10 5L0 10z" fill="var(--color-paper)" />
           </marker>
+          {PALETTE.map((p, i) => (
+            <marker
+              key={i}
+              id={`arrow-c${i}`}
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="5"
+              markerHeight="5"
+              orient="auto-start-reverse"
+            >
+              <path d="M0 0L10 5L0 10z" fill={p.value ?? DEFAULT_PAPER} />
+            </marker>
+          ))}
         </defs>
         <rect
           width="100%"
@@ -426,28 +738,48 @@ export default function Canvas() {
           )}
           {b && !editing && (
             <rect
-              x={b.x - 6}
-              y={b.y - 6}
-              width={b.w + 12}
-              height={b.h + 12}
+              x={b.x - SEL_PAD}
+              y={b.y - SEL_PAD}
+              width={b.w + SEL_PAD * 2}
+              height={b.h + SEL_PAD * 2}
               fill="none"
               stroke="var(--color-pop)"
               strokeDasharray="4 3"
               pointerEvents="none"
             />
           )}
+          {/* resize handles: corners for icon/rect/circle/text, endpoints for line/arrow */}
+          {handles.map(([h, cx, cy, cursor]) => {
+            const hs = HANDLE_PX / view.k; // keeps handles the same size on screen at any zoom
+            return (
+              <rect
+                key={h}
+                x={cx - hs / 2}
+                y={cy - hs / 2}
+                width={hs}
+                height={hs}
+                rx={hs * 0.2}
+                fill="var(--color-panel)"
+                stroke="var(--color-pop)"
+                strokeWidth={1.5 / view.k}
+                pointerEvents="all"
+                style={{ cursor }}
+                onPointerDown={(e) => startResize(e, h)}
+              />
+            );
+          })}
           {editShape && (
             <foreignObject
               x={editShape.x}
               y={editShape.y - 2}
               width="260"
-              height="30"
+              height={Math.max(30, textSize(editShape) * 1.6)}
             >
               <input
                 defaultValue={editShape.text}
                 aria-label="Text"
                 className="w-full bg-transparent text-base text-paper outline-none"
-                style={{ fontSize: 16 }}
+                style={{ fontSize: textSize(editShape) }}
                 ref={(el) => {
                   if (el) setTimeout(() => el.focus(), 0);
                 }}
@@ -474,15 +806,15 @@ export default function Canvas() {
           aria-label="Pick an icon"
           className="absolute top-3 left-[68px] z-10 grid grid-cols-4 gap-1 rounded-xl border border-line bg-panel p-2"
         >
-          {ICONS.map(([emoji, name]) => (
+          {ICONS.map(([id, name]) => (
             <button
-              key={name}
+              key={id}
               aria-label={name}
               title={name}
-              onClick={() => placeIcon(emoji)}
-              className="grid h-10 w-10 place-items-center rounded-lg text-xl hover:bg-line"
+              onClick={() => placeIcon(id)}
+              className="grid h-10 w-10 place-items-center rounded-lg text-mute hover:bg-line hover:text-paper"
             >
-              {emoji}
+              <IconGlyph id={id} />
             </button>
           ))}
         </div>
@@ -530,53 +862,58 @@ export default function Canvas() {
           Reset
         </button>
       </div>
-      <div
-        className="absolute bottom-3 left-3 flex items-center gap-1 rounded-lg border border-line bg-panel p-1"
-        role="group"
-        aria-label="History"
-      >
-        <button
-          className={btn}
-          aria-label="Undo (Ctrl+Z)"
-          title="Undo (Ctrl+Z)"
-          disabled={!past.length}
-          onClick={() => dispatch(undo())}
+      <div className="absolute bottom-3 left-3 z-10 flex items-center gap-2">
+        <div
+          className="flex items-center gap-1 rounded-lg border border-line bg-panel p-1"
+          role="group"
+          aria-label="History"
         >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden
+          <button
+            className={btn}
+            aria-label="Undo (Ctrl+Z)"
+            title="Undo (Ctrl+Z)"
+            disabled={!past.length}
+            onClick={() => dispatch(undo())}
           >
-            <path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3" />
-          </svg>
-        </button>
-        <button
-          className={btn}
-          aria-label="Redo (Ctrl+Shift+Z)"
-          title="Redo (Ctrl+Shift+Z)"
-          disabled={!future.length}
-          onClick={() => dispatch(redo())}
-        >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3" />
+            </svg>
+          </button>
+          <button
+            className={btn}
+            aria-label="Redo (Ctrl+Shift+Z)"
+            title="Redo (Ctrl+Shift+Z)"
+            disabled={!future.length}
+            onClick={() => dispatch(redo())}
           >
-            <path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3" />
-          </svg>
-        </button>
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3" />
+            </svg>
+          </button>
+        </div>
+        {selected && tool === "select" && !editing && (
+          <ShapeBar shape={selected} />
+        )}
       </div>
     </div>
   );

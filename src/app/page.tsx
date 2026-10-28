@@ -1,6 +1,3 @@
-// app/page.tsx — Chalk landing page (Next.js App Router, TypeScript, Tailwind)
-// Colors are Tailwind arbitrary values, so no tailwind.config changes are needed.
-//   board #16181d · panel #1e2026 · line #2c2f38 · chalk #ece9e1 · muted #9a9ca6 · pink #ff4d6d · blue #8fd0ff
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { Space_Grotesk, Source_Serif_4 } from "next/font/google";
@@ -96,6 +93,56 @@ const faqs = [
     a: "Rectangles, ellipses, arrows, lines, freehand, text and a set of system icons such as servers, clouds, locks and cards.",
   },
 ];
+
+// Hand-drawn sketch mark: a wobbly box, an arrow, a wobbly circle. Original artwork, not a third-party logo.
+function ChalkMark({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    // <svg
+    //   viewBox="0 0 24 24"
+    //   className={className}
+    //   aria-hidden="true"
+    //   fill="none"
+    //   strokeWidth="1.6"
+    //   strokeLinecap="round"
+    //   strokeLinejoin="round"
+    // >
+    //   <path
+    //     d="M4 5.5C7 4.6 11 5.2 13 5C13.4 8 12.8 11 13.2 13.5C10 14 7 13.4 4.6 13.8C4.2 11 4.8 8 4 5.5Z"
+    //     stroke="#ece9e1"
+    //   />
+    //   <path
+    //     d="M9 14.5C9.6 17 11 19 13.2 19.4M12 17.6 13.4 19.4 11.3 20"
+    //     stroke="#ece9e1"
+    //   />
+    //   <path
+    //     d="M15.5 15.2C18 14.4 20.6 16 20.4 18.4C20.2 20.8 17.4 21.6 15.6 20.4C13.8 19.2 13.9 16 15.5 15.2Z"
+    //     stroke="#ff4d6d"
+    //   />
+    // </svg>
+    <svg
+      className={className}
+      aria-hidden="true"
+      fill="#FF4D6D"
+      version="1.1"
+      id="Layer_1"
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 512 512"
+    >
+      <path d="M358.315,177.296L144.327,391.284c-11.609,11.609-11.609,30.497,0,42.106c10.407,10.407,26.662,11.477,38.281,3.224 l217.513-217.513L358.315,177.296z" />
+      <path d="M120.715,457.001c-12.985-12.985-19.115-30.264-18.408-47.309c-17.045,0.708-34.324-5.423-47.31-18.409 c-7.435-7.435-12.61-16.283-15.556-25.685l-12.837,47.647l72.147,72.147l47.647-12.837 C136.999,469.611,128.151,464.437,120.715,457.001z" />
+      <polygon points="16.583,450.447 0,512 61.552,495.417" />
+      <rect
+        x="361.415"
+        y="30.605"
+        transform="matrix(0.7071 -0.7071 0.7071 0.7071 29.1061 311.9788)"
+        width="59.458"
+        height="180.5"
+      />
+      <path d="M292.898,111.879L75.385,329.392c-8.253,11.619-7.184,27.873,3.224,38.281c11.609,11.609,30.497,11.609,42.106,0 l213.988-213.988L292.898,111.879z" />
+      <path d="M500.698,63.952l-52.65-52.65c-15.07-15.07-39.502-15.07-54.573,0l-11.313,11.313l107.223,107.223l11.313-11.313 C515.768,103.455,515.768,79.023,500.698,63.952z" />
+    </svg>
+  );
+}
 
 function HeroDemo() {
   const edge = (d: string, i: number) => (
@@ -204,7 +251,7 @@ function HeroDemo() {
 // ---- Bento card animations -------------------------------------------------
 // Base styles are the finished, static state, so reduced-motion users see a complete picture.
 const bentoCss = `
-.b-pill{animation:b-pill 9s ease-in-out infinite}
+.b-pill{transform:translateX(6rem);animation:b-pill 9s ease-in-out infinite}
 .b-tab{animation:b-tab 9s linear infinite}
 @keyframes b-pill{0%,30%{transform:translateX(0)}33.3%,63.3%{transform:translateX(6rem)}66.6%,96.6%{transform:translateX(12rem)}100%{transform:translateX(0)}}
 @keyframes b-tab{0%,30%{color:#16181d}33.3%,100%{color:#9a9ca6}}
@@ -234,7 +281,7 @@ function TabsLoop() {
       className="relative mt-6 inline-flex rounded-lg border border-[#2c2f38] p-1 text-sm"
       aria-hidden
     >
-      <span className="b-pill absolute left-1 top-1 h-[calc(100%-0.5rem)] w-24 translate-x-24 rounded-md bg-[#ece9e1]" />
+      <span className="b-pill absolute left-1 top-1 h-[calc(100%-0.5rem)] w-24 rounded-md bg-[#ece9e1]" />
       {["Doc", "Both", "Diagram"].map((v, i) => (
         <span
           key={v}
@@ -489,6 +536,7 @@ export default function Page() {
             href="/"
             className={`flex items-center gap-2 text-lg font-bold ${focus}`}
           >
+            <ChalkMark />
             Chalk
           </Link>
           <ul className="hidden gap-8 text-sm text-[#9a9ca6] md:flex">
@@ -710,7 +758,32 @@ export default function Page() {
 
       <footer className="border-t border-[#2c2f38] py-8 text-sm text-[#9a9ca6]">
         <div className="mx-auto flex max-w-6xl justify-between px-6">
-          <span>Chalk</span>
+          <span className="flex gap-3">
+            {" "}
+            <svg
+              className="h-5 w-5"
+              aria-hidden="true"
+              fill="#FF4D6D"
+              version="1.1"
+              id="Layer_1"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 512 512"
+            >
+              <path d="M358.315,177.296L144.327,391.284c-11.609,11.609-11.609,30.497,0,42.106c10.407,10.407,26.662,11.477,38.281,3.224 l217.513-217.513L358.315,177.296z" />
+              <path d="M120.715,457.001c-12.985-12.985-19.115-30.264-18.408-47.309c-17.045,0.708-34.324-5.423-47.31-18.409 c-7.435-7.435-12.61-16.283-15.556-25.685l-12.837,47.647l72.147,72.147l47.647-12.837 C136.999,469.611,128.151,464.437,120.715,457.001z" />
+              <polygon points="16.583,450.447 0,512 61.552,495.417" />
+              <rect
+                x="361.415"
+                y="30.605"
+                transform="matrix(0.7071 -0.7071 0.7071 0.7071 29.1061 311.9788)"
+                width="59.458"
+                height="180.5"
+              />
+              <path d="M292.898,111.879L75.385,329.392c-8.253,11.619-7.184,27.873,3.224,38.281c11.609,11.609,30.497,11.609,42.106,0 l213.988-213.988L292.898,111.879z" />
+              <path d="M500.698,63.952l-52.65-52.65c-15.07-15.07-39.502-15.07-54.573,0l-11.313,11.313l107.223,107.223l11.313-11.313 C515.768,103.455,515.768,79.023,500.698,63.952z" />
+            </svg>
+            Chalk
+          </span>
           <span>Built by Anupam Kumar Krishnan</span>
         </div>
       </footer>
