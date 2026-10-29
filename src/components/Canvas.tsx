@@ -1,5 +1,5 @@
 "use client";
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { RootState } from "@/store";
 import {
@@ -42,6 +42,9 @@ const SEL_PAD = 6; // gap between icon and its dashed selection box
 const HANDLE_PX = 10; // resize handle size on screen (stays constant while zooming)
 const ICON_STROKE = 2.5; // world units; at 48px this equals the old 1.25 * scale(2)
 
+// Copy / paste / duplicate: how far (in world units) each pasted copy shifts.
+const PASTE_OFFSET = 20;
+
 const iconSize = (s: Shape) => s.w || ICON_DEFAULT;
 
 // Text: font size lives in the shape's `h` (0 on older text → default).
@@ -52,6 +55,7 @@ const MIN_BOX = 8; // smallest rect / ellipse side
 const textSize = (s: Shape) => s.h || FONT_DEFAULT;
 
 type Handle = "nw" | "ne" | "sw" | "se" | "start" | "end";
+type Rect = { x0: number; y0: number; x1: number; y1: number };
 
 // Same as bbox(), but icons and text use their stored size, so the selection box and Fit follow resizing.
 const boxOf = (s: Shape) => {
@@ -277,11 +281,13 @@ export default function Canvas() {
   const dispatch = useDispatch();
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<{
-    kind: "pan" | "node" | "shape" | "create" | "resize";
+    kind: "pan" | "node" | "shape" | "create" | "resize" | "marquee";
     id?: string;
     x: number;
     y: number;
     moved?: boolean;
+    // marquee only: ids that were already selected when Shift+drag started
+    base?: string[];
     // resize only: fixed (opposite) corner in world space, and which way the dragged corner points
     rk?: "icon" | "box" | "text" | "start" | "end";
     ax?: number;
@@ -293,10 +299,49 @@ export default function Canvas() {
     fs0?: number;
   } | null>(null);
   const draftRef = useRef<Shape | null>(null);
+  // Internal clipboard for Ctrl+C / Ctrl+V, plus how many times the current copy was pasted
+  const clipboard = useRef<Shape[]>([]);
+  const pasteN = useRef(0);
+  // Space held = drag the background to pan instead of drawing a selection box
+  const spaceDown = useRef(false);
   const [draft, setDraft] = useState<Shape | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+
+  // Multi-selection. Redux still holds a single `selectedId` (so ShapeBar and the resize handles keep working).
+  // When 2+ shapes are selected, they live in `group` and `selectedId` is null.
+  const [group, setGroup] = useState<string[]>([]);
+  const [marquee, setMarquee] = useState<Rect | null>(null);
+  const marqRef = useRef<Rect | null>(null);
+  const setMarqueeBoth = (m: Rect | null) => {
+    marqRef.current = m;
+    setMarquee(m);
+  };
+
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   const selected = shapes.find((s) => s.id === selectedId);
+  // group members that still exist (they can vanish through undo / delete)
+  const groupIds = group.filter((id) => shapes.some((s) => s.id === id));
+  const inGroup = groupIds.length > 1;
+  const currentIds = inGroup ? groupIds : selectedId ? [selectedId] : [];
+
+  // Set the selection to any number of shapes.
+  const applySelection = useCallback(
+    (ids: string[]) => {
+      if (ids.length >= 2) {
+        setGroup(ids);
+        dispatch(selectShape(null));
+      } else {
+        setGroup([]);
+        dispatch(selectShape(ids[0] ?? null));
+      }
+    },
+    [dispatch],
+  );
+
+  // Anything that selects a single shape (creating, pasting, clicking) leaves group mode.
+  useEffect(() => {
+    if (selectedId) setGroup([]);
+  }, [selectedId]);
 
   const toWorld = (e: { clientX: number; clientY: number }) => {
     const r = svg.current!.getBoundingClientRect();
@@ -371,12 +416,16 @@ export default function Canvas() {
     return () => el.removeEventListener("wheel", onWheel);
   }, [dispatch]);
 
-  // Keyboard shortcuts (V R O A L D T I, Esc, Delete) — ignored while typing in a field.
+  // Keyboard shortcuts (V R O A L D T I, Esc, Delete, Ctrl+Z/Y, Ctrl+A/C/V/D) — ignored while typing in a field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (/INPUT|TEXTAREA/.test((e.target as HTMLElement).tagName)) return;
+      const target = e.target as HTMLElement;
+      if (/INPUT|TEXTAREA/.test(target.tagName)) return;
       const mod = e.metaKey || e.ctrlKey,
         k = e.key.toLowerCase();
+
+      if (k === " ") spaceDown.current = true;
+
       if (mod && k === "z") {
         e.preventDefault();
         dispatch(e.shiftKey ? redo() : undo());
@@ -387,18 +436,88 @@ export default function Canvas() {
         dispatch(redo());
         return;
       }
+
+      // Select all / Copy / Paste / Duplicate
+      if (mod && (k === "a" || k === "c" || k === "v" || k === "d")) {
+        // leave normal shortcuts alone in the doc editor (TipTap / ProseMirror)
+        if (target.closest?.("[contenteditable='true'], .ProseMirror")) return;
+
+        // current selection, in z-order
+        const grp = group.filter((id) => shapes.some((s) => s.id === id));
+        const ids = grp.length > 1 ? grp : selectedId ? [selectedId] : [];
+        const current = shapes.filter((s) => ids.includes(s.id));
+
+        // Put clones of `src` on the canvas, shifted by PASTE_OFFSET * n, and select them all.
+        const place = (src: Shape[], n: number) => {
+          const newIds: string[] = [];
+          src.forEach((s) => {
+            const id = newId();
+            newIds.push(id);
+            dispatch(
+              addShape({
+                ...structuredClone(s),
+                id,
+                x: s.x + PASTE_OFFSET * n,
+                y: s.y + PASTE_OFFSET * n,
+              }),
+            );
+          });
+          applySelection(newIds);
+        };
+
+        if (k === "a") {
+          e.preventDefault();
+          if (shapes.length) applySelection(shapes.map((s) => s.id));
+        } else if (k === "c") {
+          // don't hijack copying of highlighted text elsewhere on the page
+          if (window.getSelection()?.toString()) return;
+          if (!current.length) return;
+          e.preventDefault();
+          clipboard.current = structuredClone(current);
+          pasteN.current = 0;
+        } else if (k === "v") {
+          if (!clipboard.current.length) return;
+          e.preventDefault();
+          pasteN.current += 1; // each paste lands a bit further than the last
+          place(clipboard.current, pasteN.current);
+        } else {
+          // Ctrl+D: duplicate. preventDefault stops the browser's "bookmark this page".
+          e.preventDefault();
+          if (current.length) place(current, 1);
+        }
+        return;
+      }
+
       if (mod || e.altKey) return;
       const t = TOOLS.find((x) => x.key === k);
       if (t) dispatch(setTool(t.id));
       else if (k === "escape") {
         dispatch(setTool("select"));
+        setGroup([]);
         dispatch(selectShape(null));
-      } else if ((k === "delete" || k === "backspace") && selectedId)
-        dispatch(deleteShape(selectedId));
+      } else if (k === "delete" || k === "backspace") {
+        const grp = group.filter((id) => shapes.some((s) => s.id === id));
+        if (grp.length > 1) {
+          grp.forEach((id) => dispatch(deleteShape(id)));
+          setGroup([]);
+        } else if (selectedId) dispatch(deleteShape(selectedId));
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === " ") spaceDown.current = false;
+    };
+    const onBlur = () => {
+      spaceDown.current = false;
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [dispatch, selectedId]);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [dispatch, selectedId, shapes, group, applySelection]);
 
   const zoomCenter = (factor: number) => {
     const r = svg.current!.getBoundingClientRect();
@@ -434,7 +553,7 @@ export default function Canvas() {
       }),
     );
   };
-  // `iconId` is an icon id such as "database" (older saved shapes may still hold an emoji).
+
   const placeIcon = (iconId: string) => {
     const r = svg.current!.getBoundingClientRect(),
       j = (shapes.length % 5) * 14;
@@ -495,6 +614,14 @@ export default function Canvas() {
           ? { ...s, pts: [...(s.pts ?? []), [p.x - s.x, p.y - s.y]] }
           : { ...s, w: p.x - s.x, h: p.y - s.y },
       );
+      return;
+    }
+    if (d.kind === "marquee") {
+      const m = marqRef.current;
+      if (m) {
+        const p = toWorld(e);
+        setMarqueeBoth({ ...m, x1: p.x, y1: p.y });
+      }
       return;
     }
     if (d.kind === "resize") {
@@ -558,10 +685,17 @@ export default function Canvas() {
     if (d.kind === "pan") dispatch(panBy({ dx, dy }));
     else if (d.kind === "node")
       dispatch(moveNode({ id: d.id!, dx: dx / view.k, dy: dy / view.k }));
-    else dispatch(moveShape({ id: d.id!, dx: dx / view.k, dy: dy / view.k }));
+    else {
+      // dragging one member of a multi-selection moves the whole group
+      const ids = inGroup && groupIds.includes(d.id!) ? groupIds : [d.id!];
+      ids.forEach((id) =>
+        dispatch(moveShape({ id, dx: dx / view.k, dy: dy / view.k })),
+      );
+    }
   };
   const onUp = () => {
-    if (drag.current?.kind === "create" && draftRef.current) {
+    const d = drag.current;
+    if (d?.kind === "create" && draftRef.current) {
       const s = normalize(draftRef.current);
       if (s) {
         dispatch(addShape(s));
@@ -570,12 +704,52 @@ export default function Canvas() {
       setDraftBoth(null);
       dispatch(setTool("select"));
     }
+    if (d?.kind === "marquee") {
+      const m = marqRef.current;
+      if (m) {
+        const x0 = Math.min(m.x0, m.x1),
+          x1 = Math.max(m.x0, m.x1),
+          y0 = Math.min(m.y0, m.y1),
+          y1 = Math.max(m.y0, m.y1);
+        // ignore a plain click: only box-select once the box is a few pixels big
+        if (x1 - x0 > 3 / view.k || y1 - y0 > 3 / view.k) {
+          const hits = shapes
+            .filter((s) => {
+              const q = boxOf(s);
+              return (
+                q.x <= x1 && q.x + q.w >= x0 && q.y <= y1 && q.y + q.h >= y0
+              );
+            })
+            .map((s) => s.id);
+          applySelection(Array.from(new Set([...(d.base ?? []), ...hits])));
+        }
+      }
+      setMarqueeBoth(null);
+    }
     drag.current = null;
   };
   const grab = (e: React.PointerEvent, kind: "node" | "shape", id: string) => {
     if (tool !== "select") return;
     e.stopPropagation();
-    dispatch(selectShape(kind === "shape" ? id : null));
+    if (kind === "shape") {
+      // Shift / Ctrl / Cmd + click toggles a shape in or out of the selection
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        applySelection(
+          currentIds.includes(id)
+            ? currentIds.filter((x) => x !== id)
+            : [...currentIds, id],
+        );
+        return;
+      }
+      // pressing on a member of the current group keeps the group so it can be dragged together
+      if (!(inGroup && groupIds.includes(id))) {
+        setGroup([]);
+        dispatch(selectShape(id));
+      }
+    } else {
+      setGroup([]);
+      dispatch(selectShape(null));
+    }
     drag.current = { kind, id, x: e.clientX, y: e.clientY };
     svg.current?.setPointerCapture(e.pointerId);
   };
@@ -604,6 +778,20 @@ export default function Canvas() {
       );
     }
   }
+
+  // dashed outlines for a multi-selection: one per shape, plus one around the whole group
+  const groupBoxes = inGroup
+    ? shapes.filter((s) => groupIds.includes(s.id)).map(boxOf)
+    : [];
+  const groupOuter = groupBoxes.length
+    ? {
+        x0: Math.min(...groupBoxes.map((q) => q.x)) - SEL_PAD,
+        y0: Math.min(...groupBoxes.map((q) => q.y)) - SEL_PAD,
+        x1: Math.max(...groupBoxes.map((q) => q.x + q.w)) + SEL_PAD,
+        y1: Math.max(...groupBoxes.map((q) => q.y + q.h)) + SEL_PAD,
+      }
+    : null;
+
   return (
     <div className="relative h-full w-full">
       <svg
@@ -666,13 +854,26 @@ export default function Canvas() {
           width="100%"
           height="100%"
           fill="url(#dots)"
-          className={
-            tool === "select" ? "cursor-grab active:cursor-grabbing" : ""
-          }
           onPointerDown={(e) => {
             if (tool !== "select") return;
-            dispatch(selectShape(null));
-            drag.current = { kind: "pan", x: e.clientX, y: e.clientY };
+            // Space (or middle mouse) + drag pans. A plain drag draws a selection box.
+            if (spaceDown.current || e.button === 1) {
+              drag.current = { kind: "pan", x: e.clientX, y: e.clientY };
+            } else {
+              const p = toWorld(e);
+              const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+              if (!additive) {
+                setGroup([]);
+                dispatch(selectShape(null));
+              }
+              drag.current = {
+                kind: "marquee",
+                x: e.clientX,
+                y: e.clientY,
+                base: additive ? currentIds : [],
+              };
+              setMarqueeBoth({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+            }
             svg.current?.setPointerCapture(e.pointerId);
           }}
         />
@@ -748,9 +949,51 @@ export default function Canvas() {
               pointerEvents="none"
             />
           )}
-          {/* resize handles: corners for icon/rect/circle/text, endpoints for line/arrow */}
+          {/* multi-selection outlines */}
+          {!editing &&
+            groupBoxes.map((q, i) => (
+              <rect
+                key={i}
+                x={q.x - SEL_PAD}
+                y={q.y - SEL_PAD}
+                width={q.w + SEL_PAD * 2}
+                height={q.h + SEL_PAD * 2}
+                fill="none"
+                stroke="var(--color-pop)"
+                strokeDasharray="4 3"
+                strokeOpacity={0.6}
+                pointerEvents="none"
+              />
+            ))}
+          {!editing && groupOuter && (
+            <rect
+              x={groupOuter.x0 - 4}
+              y={groupOuter.y0 - 4}
+              width={groupOuter.x1 - groupOuter.x0 + 8}
+              height={groupOuter.y1 - groupOuter.y0 + 8}
+              fill="none"
+              stroke="var(--color-pop)"
+              strokeWidth={1.5 / view.k}
+              pointerEvents="none"
+            />
+          )}
+          {/* drag-to-select box */}
+          {marquee && (
+            <rect
+              x={Math.min(marquee.x0, marquee.x1)}
+              y={Math.min(marquee.y0, marquee.y1)}
+              width={Math.abs(marquee.x1 - marquee.x0)}
+              height={Math.abs(marquee.y1 - marquee.y0)}
+              fill="var(--color-pop)"
+              fillOpacity={0.08}
+              stroke="var(--color-pop)"
+              strokeWidth={1 / view.k}
+              pointerEvents="none"
+            />
+          )}
+
           {handles.map(([h, cx, cy, cursor]) => {
-            const hs = HANDLE_PX / view.k; // keeps handles the same size on screen at any zoom
+            const hs = HANDLE_PX / view.k;
             return (
               <rect
                 key={h}
